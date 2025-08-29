@@ -1,29 +1,19 @@
 pipeline {
-    agent {
-        label 'default'
-    }
+    agent any
     
     stages {
-        stage('Hello World') {
+        stage('Test') {
             steps {
-                echo 'Hello from WesTestMB!'
+                echo 'Multibranch Pipeline Working!'
                 echo "Branch: ${env.BRANCH_NAME}"
                 echo "Build: ${env.BUILD_NUMBER}"
             }
         }
         
-        stage('Environment') {
+        stage('Validate') {
             steps {
-                echo 'Environment check:'
-                sh 'whoami'
-                sh 'pwd'
-            }
-        }
-        
-        stage('Success') {
-            steps {
-                echo 'Multibranch pipeline is working!'
-                echo 'Ready for CloudBees Platform integration!'
+                echo 'CloudBees Platform Integration Ready!'
+                sh 'echo "Success from WesTestMB"'
             }
         }
     }
