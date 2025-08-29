@@ -1,55 +1,30 @@
 pipeline {
-    agent any
+    agent {
+        label 'default'
+    }
     
     stages {
-        stage('Checkout') {
+        stage('Hello World') {
             steps {
-                echo 'Checking out source code...'
-                checkout scm
-            }
-        }
-        
-        stage('Build Info') {
-            steps {
-                echo 'Build Information:'
+                echo 'Hello from WesTestMB!'
                 echo "Branch: ${env.BRANCH_NAME}"
-                echo "Build Number: ${env.BUILD_NUMBER}"
-                sh 'pwd'
-                sh 'ls -la'
+                echo "Build: ${env.BUILD_NUMBER}"
             }
         }
         
-        stage('Check Node') {
+        stage('Environment') {
             steps {
-                echo 'Checking Node.js availability...'
-                script {
-                    try {
-                        sh 'node --version'
-                        sh 'npm --version'
-                    } catch (Exception e) {
-                        echo 'Node.js not available, skipping npm steps'
-                    }
-                }
+                echo 'Environment check:'
+                sh 'whoami'
+                sh 'pwd'
             }
         }
         
         stage('Success') {
             steps {
-                echo 'Pipeline completed successfully!'
-                echo 'Ready for CloudBees Platform integration testing'
+                echo 'Multibranch pipeline is working!'
+                echo 'Ready for CloudBees Platform integration!'
             }
-        }
-    }
-    
-    post {
-        always {
-            echo 'Pipeline finished!'
-        }
-        success {
-            echo 'Build succeeded - multibranch pipeline is working!'
-        }
-        failure {
-            echo 'Build failed - check logs for details'
         }
     }
 }
