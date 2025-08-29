@@ -1,34 +1,43 @@
 pipeline {
     agent any
     
+    tools {
+        nodejs 'NodeJS'
+    }
+    
     stages {
-        stage('Build') {
+        stage('Checkout') {
             steps {
-                echo 'Building the application...'
+                echo 'Checking out source code...'
+                checkout scm
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                echo 'Installing npm dependencies...'
                 sh 'npm ci'
+            }
+        }
+        
+        stage('Lint') {
+            steps {
+                echo 'Running linter...'
+                sh 'npm run lint'
             }
         }
         
         stage('Test') {
             steps {
-                echo 'Running tests...'
+                echo 'Running unit tests...'
                 sh 'npm run test:unit'
             }
         }
         
-        stage('Security Scan') {
+        stage('Build') {
             steps {
-                echo 'Running security scans...'
-                // Add security scanning steps here
-            }
-        }
-        
-        stage('Build Docker Image') {
-            steps {
-                echo 'Building Docker image...'
-                script {
-                    def image = docker.build("hackers-organized:${env.BUILD_NUMBER}")
-                }
+                echo 'Building Vue.js application...'
+                sh 'npm run build'
             }
         }
         
@@ -38,7 +47,7 @@ pipeline {
             }
             steps {
                 echo 'Deploying to production...'
-                // Add deployment steps here
+                echo 'Build completed successfully!'
             }
         }
     }
@@ -46,6 +55,7 @@ pipeline {
     post {
         always {
             echo 'Pipeline completed!'
+            cleanWs()
         }
         success {
             echo 'Pipeline succeeded!'
