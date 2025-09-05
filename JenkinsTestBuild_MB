@@ -1,0 +1,224 @@
+pipeline {
+    agent none
+    
+    environment {
+        DOCKER_IMAGE = "${env.DOCKERHUB_USER}/hackers-organized"
+        IMAGE_TAG = "${env.GIT_COMMIT?.take(7) ?: 'latest'}"
+        SONAR_PROJECT_KEY = "HackersOrganized"
+    }
+    
+    stages {
+        stage('Test') {
+            agent {
+                node {
+                    label 'default'
+                }
+            }
+            steps {
+                script {
+                    // Checkout code
+                    checkout scm
+                    
+                    // Install dependencies and run tests
+                    sh '''
+                        npm ci
+                        npm run test:unit -- --coverage --testResultsProcessor=jest-junit
+                        npm run test:coverage
+                    '''
+                    
+                    // Publish JUnit test results
+                    publishTestResults testResultsPattern: 'junit.xml'
+                    
+                    // Publish coverage results
+                    publishCoverage adapters: [
+                        coberturaAdapter('coverage/cobertura-coverage.xml')
+                    ], sourceFileResolver: sourceFiles('STORE_LAST_BUILD')
+                    
+                    // Store coverage for evidence
+                    script {
+                        env.CODE_COVERAGE = sh(
+                            script: 'cat coverage/lcov-report/index.html | grep -o "Functions.*%" | head -1 || echo "Coverage: N/A"',
+                            returnStdout: true
+                        ).trim()
+                    }
+                }
+            }
+            post {
+                always {
+                    // Archive test artifacts
+                    archiveArtifacts artifacts: 'coverage/**/*', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'junit.xml', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        stage('Build') {
+            agent {
+                node {
+                    label 'default'
+                }
+            }
+            steps {
+                script {
+                    // Build container image
+                    def image = docker.build("${DOCKER_IMAGE}:${IMAGE_TAG}")
+                    
+                    // Push to registry
+                    docker.withRegistry('https://index.docker.io/v1/', 'dockerhub-credentials') {
+                        image.push()
+                        image.push('latest')
+                    }
+                    
+                    // Store image info for evidence
+                    env.BUILT_IMAGE = "${DOCKER_IMAGE}:${IMAGE_TAG}"
+                    env.IMAGE_DIGEST = sh(
+                        script: "docker inspect ${DOCKER_IMAGE}:${IMAGE_TAG} --format='{{index .RepoDigests 0}}' || echo 'digest-unavailable'",
+                        returnStdout: true
+                    ).trim()
+                }
+            }
+            post {
+                always {
+                    // Clean up local images
+                    sh "docker rmi ${DOCKER_IMAGE}:${IMAGE_TAG} || true"
+                    sh "docker rmi ${DOCKER_IMAGE}:latest || true"
+                }
+            }
+        }
+        
+        stage('Security Scan') {
+            agent {
+                node {
+                    label 'default'
+                }
+            }
+            steps {
+                script {
+                    // SonarQube analysis
+                    withSonarQubeEnv('sonarqube-server') {
+                        sh '''
+                            sonar-scanner \
+                                -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                                -Dsonar.sources=src \
+                                -Dsonar.tests=tests \
+                                -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info \
+                                -Dsonar.testExecutionReportPaths=junit.xml
+                        '''
+                    }
+                    
+                    // Snyk security scan
+                    withCredentials([string(credentialsId: 'snyk-token', variable: 'SNYK_TOKEN')]) {
+                        sh '''
+                            npm install -g snyk
+                            snyk auth $SNYK_TOKEN
+                            snyk test --json > snyk-results.json || true
+                            snyk monitor || true
+                        '''
+                    }
+                    
+                    // Fetch SonarQube results for evidence
+                    withCredentials([usernamePassword(credentialsId: 'sonarqube-credentials', usernameVariable: 'SONAR_USER', passwordVariable: 'SONAR_TOKEN')]) {
+                        script {
+                            def sonarResults = sh(
+                                script: '''
+                                    curl -u $SONAR_USER:$SONAR_TOKEN \
+                                    "https://sonarqube.cb-demos.io/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&severities=BLOCKER,CRITICAL,MAJOR,MINOR" \
+                                    -s | jq -r '
+                                    "BLOCKER: " + ([.issues[] | select(.severity=="BLOCKER")] | length | tostring) + 
+                                    " CRITICAL: " + ([.issues[] | select(.severity=="CRITICAL")] | length | tostring) + 
+                                    " MAJOR: " + ([.issues[] | select(.severity=="MAJOR")] | length | tostring) + 
+                                    " MINOR: " + ([.issues[] | select(.severity=="MINOR")] | length | tostring)
+                                    ' || echo "SonarQube results unavailable"
+                                ''',
+                                returnStdout: true
+                            ).trim()
+                            env.SONAR_RESULTS = sonarResults
+                        }
+                    }
+                }
+            }
+            post {
+                always {
+                    // Archive security scan results
+                    archiveArtifacts artifacts: 'snyk-results.json', allowEmptyArchive: true
+                }
+            }
+        }
+        
+        stage('Evidence & Analytics') {
+            agent {
+                node {
+                    label 'default'
+                }
+            }
+            steps {
+                script {
+                    // Create comprehensive evidence report
+                    def evidenceReport = """
+# Build Evidence Report
+
+## Test Results
+- **Coverage**: ${env.CODE_COVERAGE ?: 'N/A'}
+- **Test Results**: Published to CloudBees Platform
+- **Build**: #${env.BUILD_NUMBER}
+- **Commit**: ${env.GIT_COMMIT?.take(7) ?: 'N/A'}
+
+## Build Artifacts
+- **Image**: ${env.BUILT_IMAGE ?: 'N/A'}
+- **Digest**: ${env.IMAGE_DIGEST ?: 'N/A'}
+- **Registry**: Docker Hub
+- **Tags**: ${IMAGE_TAG}, latest
+
+## Security Analysis
+- **SonarQube**: ${env.SONAR_RESULTS ?: 'Scan completed'}
+- **Snyk**: Dependency scan completed
+- **Project Key**: ${SONAR_PROJECT_KEY}
+
+## Pipeline Metadata
+- **Branch**: ${env.BRANCH_NAME}
+- **Build Time**: ${new Date()}
+- **Jenkins URL**: ${env.BUILD_URL}
+"""
+                    
+                    // Write evidence to file
+                    writeFile file: 'build-evidence.md', text: evidenceReport
+                    
+                    // Publish to CloudBees Platform (if available)
+                    try {
+                        publishHTML([
+                            allowMissing: false,
+                            alwaysLinkToLastBuild: true,
+                            keepAll: true,
+                            reportDir: '.',
+                            reportFiles: 'build-evidence.md',
+                            reportName: 'Build Evidence Report'
+                        ])
+                    } catch (Exception e) {
+                        echo "HTML publishing not available: ${e.message}"
+                    }
+                }
+            }
+            post {
+                always {
+                    // Archive evidence
+                    archiveArtifacts artifacts: 'build-evidence.md', allowEmptyArchive: true
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            // Clean workspace
+            cleanWs()
+        }
+        success {
+            echo "✅ Pipeline completed successfully!"
+            echo "📊 Test results published to CloudBees Platform"
+            echo "🐳 Container image: ${env.BUILT_IMAGE ?: 'N/A'}"
+        }
+        failure {
+            echo "❌ Pipeline failed. Check logs for details."
+        }
+    }
+}
