@@ -59,7 +59,8 @@ pipeline {
                     url: "${BUILD_URL}artifact/dist/",
                     version: "${BUILD_NUMBER}",
                     digest: "${GIT_COMMIT}",
-                    label: "demo"
+                    label: "demo",
+                    type: "app"
                 )
             }
         }
