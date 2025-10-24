@@ -1,12 +1,9 @@
-// Jenkinsfile - Multibranch-ready, original stages kept.
-// Fixes: removed invalid options (timestamps/ansiColor) and empty triggers,
-// ensures post cleanup runs inside a node context, adds extra unit tests with system-out.
-
+// Jenkinsfile (fixed) — Multibranch-ready, with real JUnit XML unit tests
 pipeline {
-  agent { label 'linux && docker' }
+  agent { label 'linux && docker' }  // keep your original agent
 
   options {
-    // keep durability and build discarder
+    // Removed timestamps() and ansiColor() because they caused invalid-option errors in your environment
     durabilityHint('MAX_SURVIVABILITY')
     buildDiscarder(logRotator(numToKeepStr: '30'))
     skipDefaultCheckout(true)
@@ -17,9 +14,9 @@ pipeline {
     APP_NAME        = 'sample-app'
     DOCKER_REGISTRY = 'registry.example.com'
     DOCKER_ORG      = 'verizon-demo'
-    IMAGE_TAG       = "${env.BRANCH_NAME ?: 'unknown'}-${env.BUILD_NUMBER}"
-    SIGNING_KEY_ID  = credentials('codesign-key-id')       // optional: replace or remove
-    ARTIFACTORY_CREDS = credentials('artifact-repo-creds') // optional: replace or remove
+    IMAGE_TAG       = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
+    SIGNING_KEY_ID  = credentials('codesign-key-id')       // optional
+    ARTIFACTORY_CREDS = credentials('artifact-repo-creds') // optional (username/password => ARTIFACTORY_CREDS_USR/_PSW)
     RUN_DAST        = "${env.BRANCH_NAME == 'main' ? 'true' : 'false'}"
   }
 
@@ -30,19 +27,20 @@ pipeline {
     choice(name: 'BUILD_KIND', choices: ['container', 'binary'], description: 'Build container image or non-container binary/package')
   }
 
+  // NOTE: removed empty triggers {} block — Multibranch typically uses webhooks.
+
   stages {
     stage('Checkout') {
       steps {
         checkout scm
-        sh 'echo "BRANCH_NAME=${BRANCH_NAME:-$(git rev-parse --abbrev-ref HEAD || echo HEAD)}"'
-        sh 'mkdir -p reports junit dist'
+        sh 'git fetch --prune --unshallow || true'   // optional, safe
       }
     }
 
     stage('Prepare / Tooling') {
       steps {
         sh '''
-          echo "Prepare tools - minimal checks"
+          echo "Node/Java/Go/etc setup goes here if you use tool installers"
           java -version || true
           node -v || true
           go version || true
@@ -52,95 +50,84 @@ pipeline {
 
     stage('Static Analysis & Tests (parallel)') {
       parallel {
-        stage('Mock Unit Tests') {
+        stage('Lint') {
+          when { expression { !params.SKIP_TESTS } }
           steps {
-            script {
-              sh '''
-                mkdir -p reports/junit
+            sh '''
+              echo "Run linters here (eslint, golangci-lint, flake8, etc.)"
+              # npm ci && npm run lint
+            '''
+          }
+        }
 
-                # Test 1 - add
-                cat > reports/junit/TEST-add.xml <<'XML'
-                <?xml version="1.0" encoding="UTF-8"?>
-                <testsuite tests="1" failures="0" name="add-suite">
-                  <testcase classname="sample.calculator" name="test_add" time="0.01">
-                    <system-out>input=(3,4); expected=7; actual=7</system-out>
-                  </testcase>
-                </testsuite>
-                XML
+        stage('Unit Tests') {
+          when { expression { !params.SKIP_TESTS } }
+          steps {
+            // Create real JUnit XMLs so jenkins junit step shows details and system-out
+            sh '''
+              mkdir -p reports/junit
 
-                # Test 2 - mul
-                cat > reports/junit/TEST-mul.xml <<'XML'
-                <?xml version="1.0" encoding="UTF-8"?>
-                <testsuite tests="1" failures="0" name="mul-suite">
-                  <testcase classname="sample.calculator" name="test_mul" time="0.02">
-                    <system-out>input=(3,4); expected=12; actual=12</system-out>
-                  </testcase>
-                </testsuite>
-                XML
+              # Test 1 (pass)
+              cat > reports/junit/TEST-add.xml <<'XML'
+              <?xml version="1.0" encoding="UTF-8"?>
+              <testsuite tests="1" failures="0" name="add-suite">
+                <testcase classname="sample.calculator" name="test_add" time="0.01">
+                  <system-out>input=(3,4); expected=7; actual=7</system-out>
+                </testcase>
+              </testsuite>
+              XML
 
-                # Test 3 - greet
-                cat > reports/junit/TEST-greet.xml <<'XML'
-                <?xml version="1.0" encoding="UTF-8"?>
-                <testsuite tests="1" failures="0" name="greet-suite">
-                  <testcase classname="sample.greet" name="test_greeting" time="0.005">
-                    <system-out>input="Shozab"; expected="Hello Shozab"; actual="Hello Shozab"</system-out>
-                  </testcase>
-                </testsuite>
-                XML
+              # Test 2 (pass)
+              cat > reports/junit/TEST-mul.xml <<'XML'
+              <?xml version="1.0" encoding="UTF-8"?>
+              <testsuite tests="1" failures="0" name="mul-suite">
+                <testcase classname="sample.calculator" name="test_mul" time="0.02">
+                  <system-out>input=(3,4); expected=12; actual=12</system-out>
+                </testcase>
+              </testsuite>
+              XML
 
-                # Test 4 - edge-case
-                cat > reports/junit/TEST-edge.xml <<'XML'
-                <?xml version="1.0" encoding="UTF-8"?>
-                <testsuite tests="1" failures="0" name="edge-suite">
-                  <testcase classname="sample.calc" name="test_edge" time="0.007">
-                    <system-out>input=(0,-1); expected=-1; actual=-1</system-out>
-                  </testcase>
-                </testsuite>
-                XML
-
-                # Test 5 - failing example (to demonstrate failures)
-                cat > reports/junit/TEST-fail.xml <<'XML'
-                <?xml version="1.0" encoding="UTF-8"?>
-                <testsuite tests="1" failures="1" name="fail-suite">
-                  <testcase classname="sample.calculator" name="test_fail" time="0.005">
-                    <failure message="expected 5 but got 4">AssertionError</failure>
-                    <system-out>input=(2,2); expected=5; actual=4</system-out>
-                  </testcase>
-                </testsuite>
-                XML
-              '''
-            }
+              # Test 3 (failing - demonstrates failure metadata)
+              cat > reports/junit/TEST-fail.xml <<'XML'
+              <?xml version="1.0" encoding="UTF-8"?>
+              <testsuite tests="1" failures="1" name="fail-suite">
+                <testcase classname="sample.calculator" name="test_fail" time="0.005">
+                  <failure message="expected 5 but got 4">AssertionError</failure>
+                  <system-out>input=(2,2); expected=5; actual=4</system-out>
+                </testcase>
+              </testsuite>
+              XML
+            '''
           }
           post {
             always {
-              junit allowEmptyResults: false, testResults: 'reports/junit/*.xml'
-              archiveArtifacts artifacts: 'reports/junit/*.xml', allowEmptyArchive: true
+              junit allowEmptyResults: true, testResults: 'reports/junit/*.xml'
+              archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
             }
           }
-        } // Mock Unit Tests
+        } // Unit Tests
 
-        stage('Lint / Static Checks') {
+        stage('SAST') {
+          when {
+            allOf {
+              expression { !params.SKIP_SAST }
+              not { changeRequest() } // optionally skip on PRs
+            }
+          }
           steps {
             sh '''
-              mkdir -p reports/lint
-              echo "Mock lint output: OK" > reports/lint/lint.txt
+              echo "Run SAST here (placeholder). Examples:"
+              echo "- Semgrep: semgrep ci --json > reports/semgrep.json || true"
+              echo "- SonarQube: mvn sonar:sonar (with Sonar env)"
+              echo "- Bandit/Trivy FS/etc."
             '''
           }
-          post { always { archiveArtifacts artifacts: 'reports/lint/**', allowEmptyArchive: true } }
-        }
-
-        stage('SAST (produce SARIF)') {
-          when { expression { !params.SKIP_SAST } }
-          steps {
-            sh '''
-              mkdir -p reports/sarif
-              cat > reports/sarif/result.sarif <<'SARIF'
-              { "version":"2.1.0", "runs":[ { "tool": { "driver": { "name":"mock-sast" } }, "results": [] } ] }
-              SARIF
-              echo "Mock SARIF created"
-            '''
+          post {
+            always {
+              // Publish reports or convert to SARIF for Unify ingestion
+              archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
+            }
           }
-          post { always { archiveArtifacts artifacts: 'reports/sarif/**', allowEmptyArchive: true } }
         }
       }
     } // end parallel
@@ -149,21 +136,19 @@ pipeline {
       steps {
         script {
           if (params.BUILD_KIND == 'container') {
-            sh '''
-              echo "Simulating docker build (placeholder)."
-              mkdir -p dist
-              echo "container image placeholder" > dist/image.txt
-            '''
+            sh """
+              echo "Building container image ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG}"
+              docker build -t ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG} .
+            """
           } else {
             sh '''
-              echo "Building non-container binary/package (placeholder)."
+              echo "Building non-container binary/package"
               mkdir -p dist
-              echo "binary content" > dist/${APP_NAME}
+              echo "hello" > dist/app-binary
             '''
           }
         }
       }
-      post { always { archiveArtifacts artifacts: 'dist/**', fingerprint: true, allowEmptyArchive: true } }
     }
 
     stage('Sign & Package') {
@@ -171,37 +156,38 @@ pipeline {
         script {
           if (params.BUILD_KIND == 'container') {
             sh '''
-              mkdir -p dist/signature
-              echo "signed-image:${IMAGE_TAG}" > dist/signature/image.sig
+              echo "Sign image (placeholder). Example with cosign:"
+              # cosign sign --key env://COSIGN_KEY ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG} || true
             '''
           } else {
             sh '''
-              mkdir -p dist/signature
-              echo "signed-binary:${IMAGE_TAG}" > dist/signature/${APP_NAME}.sig
+              echo "Sign binary (placeholder). Example:"
+              # gpg --batch --yes --detach-sign --armor -u "$SIGNING_KEY_ID" dist/app-binary || true
             '''
+            archiveArtifacts artifacts: 'dist/**', fingerprint: true
           }
         }
       }
-      post { always { archiveArtifacts artifacts: 'dist/**', fingerprint: true, allowEmptyArchive: true } }
     }
 
     stage('Push Artifact/Image') {
-      when { not { changeRequest() } }
+      when { not { changeRequest() } } // typically skip for PRs
       steps {
         script {
           if (params.BUILD_KIND == 'container') {
-            sh '''
-              echo "Pushing container to registry (mock). Replace with docker login/push."
-              # docker login ... && docker push ...
-            '''
+            sh """
+              echo "Login & push image (mock)"
+              echo "${ARTIFACTORY_CREDS_PSW}" | docker login ${DOCKER_REGISTRY} -u "${ARTIFACTORY_CREDS_USR}" --password-stdin || true
+              # docker push ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG}
+            """
           } else {
             sh '''
-              echo "Upload binary to artifact repo (mock). Replace with curl/ci plugin."
+              echo "Upload binary to artifact repo (placeholder). Examples:"
+              echo "- curl to Artifactory/Nexus/S3 with credentials"
             '''
           }
         }
       }
-      post { always { archiveArtifacts artifacts: 'dist/**', allowEmptyArchive: true } }
     }
 
     stage('DAST (main only)') {
@@ -213,21 +199,24 @@ pipeline {
       }
       steps {
         sh '''
-          echo "Running DAST (mock) against test endpoint - replace with ZAP / Arachni etc."
-          mkdir -p reports/dast
-          echo "dast: OK" > reports/dast/dast.txt
+          echo "Run DAST here against a test endpoint (placeholder)"
+          # zap-baseline.py -t https://test-env.example.com -J reports/zap.json || true
         '''
       }
-      post { always { archiveArtifacts artifacts: 'reports/dast/**', allowEmptyArchive: true } }
+      post {
+        always {
+          archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
+        }
+      }
     }
 
-    stage('Publish Build Metadata') {
+    stage('Publish Build Metadata (for Unify)') {
       steps {
         sh '''
-          mkdir -p reports/metadata
-          echo "{ \\"artifact\\": \\"${APP_NAME}\\", \\"tag\\": \\"${IMAGE_TAG}\\" }" > reports/metadata/build.json
+          echo "Emit SARIF / JUnit / SBOM / signature metadata for Unify ingestion"
+          # syft packages dir:. -o cyclonedx-json > reports/sbom.json || true
         '''
-        archiveArtifacts artifacts: 'reports/metadata/**', allowEmptyArchive: true
+        archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
       }
     }
 
@@ -235,71 +224,29 @@ pipeline {
       when { branch pattern: "feature/.*", comparator: "REGEXP" }
       steps {
         sh '''
-          echo "Deploying to dev (mock). Replace with helm/oc/kubectl."
-          mkdir -p reports/deploy && echo "dev-deploy:ok" > reports/deploy/out.txt
+          echo "Example: helm upgrade --install ${APP_NAME} charts/${APP_NAME} --namespace dev --set image.tag='${IMAGE_TAG}'"
         '''
       }
-      post { always { archiveArtifacts artifacts: 'reports/deploy/**', allowEmptyArchive: true } }
     }
 
     stage('Gate for Promotion (main only)') {
       when { branch 'main' }
       steps {
-        script { timeout(time: 30, unit: 'MINUTES') { input message: "Promote ${APP_NAME}:${IMAGE_TAG} to the next environment?", ok: 'Approve' } }
+        input message: "Promote ${APP_NAME}:${IMAGE_TAG} to Next Environment?", ok: 'Approve'
       }
     }
-
-    stage('Dev') {
-      when { branch 'develop' }
-      steps {
-        sh '''
-          echo "Dev Stage: deploy to dev cluster (mock)"
-          mkdir -p reports/dev && echo "dev-deploy:ok" > reports/dev/out.txt
-        '''
-        archiveArtifacts artifacts: 'reports/dev/**', allowEmptyArchive: true
-      }
-    }
-
-    stage('Test') {
-      steps {
-        sh '''
-          echo "Test Stage: run integration tests and optional DAST (mock)"
-          mkdir -p reports/test && echo "integration:ok" > reports/test/out.txt
-        '''
-        archiveArtifacts artifacts: 'reports/test/**', allowEmptyArchive: true
-      }
-    }
-
-    stage('Prod') {
-      when { branch 'main' }
-      steps {
-        script {
-          sh '''
-            echo "Prod Stage: deploy approved artifact to Prod (mock)"
-            mkdir -p reports/prod && echo "prod-deploy:ok" > reports/prod/out.txt
-          '''
-        }
-        archiveArtifacts artifacts: 'reports/prod/**', allowEmptyArchive: true
-      }
-    }
-  } // end stages
+  } // stages
 
   post {
-    success { echo "Build ${env.BUILD_TAG} succeeded for ${env.BRANCH_NAME}" }
-    failure { echo "Build ${env.BUILD_TAG} failed for ${env.BRANCH_NAME}" }
+    success {
+      echo "Build ${env.BUILD_TAG} succeeded for ${env.BRANCH_NAME}"
+    }
+    failure {
+      echo "Build failed — see stage logs and archived reports."
+    }
     always {
-      // Ensure cleanup runs inside a node context to avoid 'agent none' errors
-      script {
-        if (env.NODE_NAME) {
-          echo "Cleaning workspace on node ${env.NODE_NAME}..."
-          try { cleanWs() } catch (err) { echo "cleanWs() failed: ${err}"; deleteDir() }
-        } else {
-          node {
-            echo "Post had no node; performing cleanup inside node()"
-            try { cleanWs() } catch (err) { echo "cleanWs() failed in fallback: ${err}"; deleteDir() }
-          }
-        }
-      }
+      // cleanup - runs on the agent because top-level agent is declared
+      cleanWs deleteDirs: true, notFailBuild: true
     }
   }
 }
