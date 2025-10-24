@@ -245,5 +245,6 @@ stage('Prod') {
       // deleteDir() is safer / available in your Jenkins instance
       script { deleteDir() }
     }
+    }
   }
 }
