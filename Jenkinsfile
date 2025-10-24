@@ -220,21 +220,20 @@ pipeline {
         }
       }
     }
-
-    stage('Prod') {
-      agent any
-      when { branch 'main' }
-      steps {
-        script {
-          timeout(time: 30, unit: 'MINUTES') {
-            input message: "Approve promotion of ${APP_NAME}:${IMAGE_TAG} to PROD?", ok: 'Approve', submitter: 'approver1,approver2'
-          }
-          echo 'Prod Stage: deploy approved artifact to Prod (mock)'
-          sh 'mkdir -p reports; echo "prod-deploy:ok" > reports/prod-deploy.txt'
-          archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/prod-deploy.txt'
-        }
-      }
+stage('Prod') {
+  agent any
+  when { beforeAgent true; branch 'main' }
+  steps {
+    timeout(time: 30, unit: 'MINUTES') {
+      input message: "Approve promotion of ${APP_NAME}:${IMAGE_TAG} to PROD?",
+            ok: 'Approve',
+            submitter: 'approver1,approver2'
     }
+    echo 'Prod Stage: deploy approved artifact to Prod (mock)'
+    sh 'mkdir -p reports; echo "prod-deploy:ok" > reports/prod-deploy.txt'
+    archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/prod-deploy.txt'
+  }
+}
 
   } // stages
 
