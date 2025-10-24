@@ -5,8 +5,8 @@
 pipeline {
   agent any
   options {
-    timestamps()
-    ansiColor('xterm')
+-   timestamps()
+-   ansiColor('xterm')
     durabilityHint('MAX_SURVIVABILITY')
     buildDiscarder(logRotator(numToKeepStr: '30'))
     skipDefaultCheckout(true)
@@ -33,10 +33,11 @@ pipeline {
     choice(name: 'BUILD_KIND', choices: ['container', 'binary'], description: 'Build container image or non-container binary/package')
   }
 
-  triggers {
-    // Webhook-based triggers come from Multibranch automatically; a cron is optional
-    // pollSCM('H/5 * * * *')
-  }
+- triggers {
+-   // Webhook-based triggers come from Multibranch automatically; a cron is optional
+-   // pollSCM('H/5 * * * *')
+- }
++ // No triggers block needed for Multibranch; webhooks/PR events handle this.
 
   stages {
     stage('Checkout') {
