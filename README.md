@@ -1,6 +1,7 @@
 ## Change History
-sn: My First Commit
-sn: My Second Commit
+- sn: My First Commit
+- sn: My Second Commit
+- sn: My Third Commit
 
 # ###########################################################
 # PLEASE NOTE:  DOW Demo YAML File located in Root Directory
