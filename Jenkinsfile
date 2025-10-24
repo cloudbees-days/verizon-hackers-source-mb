@@ -1,11 +1,12 @@
-// Jenkinsfile - Multibranch-ready; retains original stages but fixes post cleanup (node context).
+// Jenkinsfile - Multibranch-ready, original stages kept.
+// Fixes: removed invalid options (timestamps/ansiColor) and empty triggers,
+// ensures post cleanup runs inside a node context, adds extra unit tests with system-out.
+
 pipeline {
-  // Use your original agent label; keeps behavior consistent with previous file.
   agent { label 'linux && docker' }
 
   options {
-    timestamps()
-    ansiColor('xterm')
+    // keep durability and build discarder
     durabilityHint('MAX_SURVIVABILITY')
     buildDiscarder(logRotator(numToKeepStr: '30'))
     skipDefaultCheckout(true)
@@ -17,8 +18,8 @@ pipeline {
     DOCKER_REGISTRY = 'registry.example.com'
     DOCKER_ORG      = 'verizon-demo'
     IMAGE_TAG       = "${env.BRANCH_NAME ?: 'unknown'}-${env.BUILD_NUMBER}"
-    SIGNING_KEY_ID  = credentials('codesign-key-id')       // optional
-    ARTIFACTORY_CREDS = credentials('artifact-repo-creds') // optional
+    SIGNING_KEY_ID  = credentials('codesign-key-id')       // optional: replace or remove
+    ARTIFACTORY_CREDS = credentials('artifact-repo-creds') // optional: replace or remove
     RUN_DAST        = "${env.BRANCH_NAME == 'main' ? 'true' : 'false'}"
   }
 
@@ -29,15 +30,9 @@ pipeline {
     choice(name: 'BUILD_KIND', choices: ['container', 'binary'], description: 'Build container image or non-container binary/package')
   }
 
-  triggers {
-    // Multibranch webhooks typically used; optional cron:
-    // pollSCM('H/5 * * * *')
-  }
-
   stages {
     stage('Checkout') {
       steps {
-        // Let Multibranch populate scm
         checkout scm
         sh 'echo "BRANCH_NAME=${BRANCH_NAME:-$(git rev-parse --abbrev-ref HEAD || echo HEAD)}"'
         sh 'mkdir -p reports junit dist'
@@ -47,7 +42,7 @@ pipeline {
     stage('Prepare / Tooling') {
       steps {
         sh '''
-          echo "Prepare tools (node/java/go) - minimal checks"
+          echo "Prepare tools - minimal checks"
           java -version || true
           node -v || true
           go version || true
@@ -60,7 +55,6 @@ pipeline {
         stage('Mock Unit Tests') {
           steps {
             script {
-              // Create several JUnit XML files with system-out output for visibility
               sh '''
                 mkdir -p reports/junit
 
@@ -84,7 +78,27 @@ pipeline {
                 </testsuite>
                 XML
 
-                # Test 3 - failing example (optional)
+                # Test 3 - greet
+                cat > reports/junit/TEST-greet.xml <<'XML'
+                <?xml version="1.0" encoding="UTF-8"?>
+                <testsuite tests="1" failures="0" name="greet-suite">
+                  <testcase classname="sample.greet" name="test_greeting" time="0.005">
+                    <system-out>input="Shozab"; expected="Hello Shozab"; actual="Hello Shozab"</system-out>
+                  </testcase>
+                </testsuite>
+                XML
+
+                # Test 4 - edge-case
+                cat > reports/junit/TEST-edge.xml <<'XML'
+                <?xml version="1.0" encoding="UTF-8"?>
+                <testsuite tests="1" failures="0" name="edge-suite">
+                  <testcase classname="sample.calc" name="test_edge" time="0.007">
+                    <system-out>input=(0,-1); expected=-1; actual=-1</system-out>
+                  </testcase>
+                </testsuite>
+                XML
+
+                # Test 5 - failing example (to demonstrate failures)
                 cat > reports/junit/TEST-fail.xml <<'XML'
                 <?xml version="1.0" encoding="UTF-8"?>
                 <testsuite tests="1" failures="1" name="fail-suite">
@@ -116,9 +130,7 @@ pipeline {
         }
 
         stage('SAST (produce SARIF)') {
-          when {
-            expression { !params.SKIP_SAST }
-          }
+          when { expression { !params.SKIP_SAST } }
           steps {
             sh '''
               mkdir -p reports/sarif
@@ -130,8 +142,8 @@ pipeline {
           }
           post { always { archiveArtifacts artifacts: 'reports/sarif/**', allowEmptyArchive: true } }
         }
-      } // parallel
-    } // Static Analysis & Tests
+      }
+    } // end parallel
 
     stage('Build') {
       steps {
@@ -174,7 +186,7 @@ pipeline {
     }
 
     stage('Push Artifact/Image') {
-      when { not { changeRequest() } } // skip on PRs
+      when { not { changeRequest() } }
       steps {
         script {
           if (params.BUILD_KIND == 'container') {
@@ -233,12 +245,7 @@ pipeline {
     stage('Gate for Promotion (main only)') {
       when { branch 'main' }
       steps {
-        script {
-          // interactive promotion input
-          timeout(time: 30, unit: 'MINUTES') {
-            input message: "Promote ${APP_NAME}:${IMAGE_TAG} to the next environment?", ok: 'Approve'
-          }
-        }
+        script { timeout(time: 30, unit: 'MINUTES') { input message: "Promote ${APP_NAME}:${IMAGE_TAG} to the next environment?", ok: 'Approve' } }
       }
     }
 
@@ -267,7 +274,6 @@ pipeline {
       when { branch 'main' }
       steps {
         script {
-          // manual approval handled earlier; do final prod deploy (mock)
           sh '''
             echo "Prod Stage: deploy approved artifact to Prod (mock)"
             mkdir -p reports/prod && echo "prod-deploy:ok" > reports/prod/out.txt
@@ -276,38 +282,21 @@ pipeline {
         archiveArtifacts artifacts: 'reports/prod/**', allowEmptyArchive: true
       }
     }
-  } // stages
+  } // end stages
 
   post {
-    success {
-      echo "Build ${env.BUILD_TAG} succeeded for ${env.BRANCH_NAME}"
-    }
-    failure {
-      echo "Build ${env.BUILD_TAG} failed for ${env.BRANCH_NAME}"
-    }
+    success { echo "Build ${env.BUILD_TAG} succeeded for ${env.BRANCH_NAME}" }
+    failure { echo "Build ${env.BUILD_TAG} failed for ${env.BRANCH_NAME}" }
     always {
-      // Ensure cleanup runs inside a node context. If post executes without a node, we allocate one.
+      // Ensure cleanup runs inside a node context to avoid 'agent none' errors
       script {
         if (env.NODE_NAME) {
-          // We already have a node context; use cleanWs()
           echo "Cleaning workspace on node ${env.NODE_NAME}..."
-          try {
-            cleanWs()
-          } catch (err) {
-            echo "cleanWs() failed: ${err}"
-            // fallback
-            deleteDir()
-          }
+          try { cleanWs() } catch (err) { echo "cleanWs() failed: ${err}"; deleteDir() }
         } else {
-          // Post ran with no node. Allocate a node to clean workspace to avoid 'agent none' error.
           node {
             echo "Post had no node; performing cleanup inside node()"
-            try {
-              cleanWs()
-            } catch (err) {
-              echo "cleanWs() in fallback node failed: ${err}; trying deleteDir()"
-              deleteDir()
-            }
+            try { cleanWs() } catch (err) { echo "cleanWs() failed in fallback: ${err}"; deleteDir() }
           }
         }
       }
