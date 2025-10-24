@@ -1,6 +1,6 @@
 // Jenkinsfile (fixed) — Multibranch-ready, with real JUnit XML unit tests
 pipeline {
-  agent { label 'linux && docker' }  // keep your original agent
+  agent any
 
   options {
     // Removed timestamps() and ansiColor() because they caused invalid-option errors in your environment
