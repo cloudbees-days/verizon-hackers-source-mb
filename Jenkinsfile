@@ -241,6 +241,7 @@ stage('Prod') {
     success { echo "Pipeline succeeded on branch ${env.BRANCH_NAME}" }
     failure { echo "Pipeline failed on branch ${env.BRANCH_NAME}" }
     always {
+      node any {
       // deleteDir() is safer / available in your Jenkins instance
       script { deleteDir() }
     }
