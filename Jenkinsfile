@@ -1,10 +1,11 @@
-// Jenkinsfile (Declarative) — Multibranch-ready
-// Works with PRs, feature branches, tags, and main. Includes gated release steps on main.
-// Safe defaults + clear extension points for CBCI: scanners, artifact signing, uploads, etc.
+// Jenkinsfile — Multibranch-ready, Declarative
+// Revisions: replaced cleanWs() -> deleteDir(); replace heredocs with writeFile(); ensure artifacts exist.
 
 pipeline {
-  agent any
+  agent none
+
   options {
+    // kept minimal for compatibility
     durabilityHint('MAX_SURVIVABILITY')
     buildDiscarder(logRotator(numToKeepStr: '30'))
     skipDefaultCheckout(true)
@@ -12,216 +13,237 @@ pipeline {
   }
 
   environment {
-    APP_NAME        = 'sample-app'
-    // Change registry/org to yours if building containers
+    APP_NAME = 'sample-app'
     DOCKER_REGISTRY = 'registry.example.com'
-    DOCKER_ORG      = 'verizon-demo'
-    IMAGE_TAG       = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
-    // If you sign artifacts/images, wire your credentials/keys here
-    SIGNING_KEY_ID  = credentials('codesign-key-id')       // optional
-    ARTIFACTORY_CREDS = credentials('artifact-repo-creds') // optional
-    // Useful flags
-    RUN_DAST        = "${env.BRANCH_NAME == 'main' ? 'true' : 'false'}"
+    DOCKER_ORG = 'verizon-demo'
+    ARTIFACTORY_CREDENTIALS_ID = 'artifact-repo-creds'
+    SIGNING_KEY_ID = 'codesign-key-id'
   }
 
   parameters {
-    booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip unit/integration tests')
-    booleanParam(name: 'SKIP_SAST', defaultValue: false, description: 'Skip SAST (not recommended)')
-    booleanParam(name: 'SKIP_DAST', defaultValue: false, description: 'Skip DAST on main')
     choice(name: 'BUILD_KIND', choices: ['container', 'binary'], description: 'Build container image or non-container binary/package')
+    booleanParam(name: 'SKIP_SAST', defaultValue: false, description: 'Skip SAST (not recommended)')
+    booleanParam(name: 'SKIP_DAST', defaultValue: false, description: 'Skip DAST (main only)')
+    booleanParam(name: 'SKIP_TESTS', defaultValue: false, description: 'Skip unit tests')
   }
 
   stages {
     stage('Checkout') {
+      agent { label 'default' }
       steps {
         checkout scm
-        // optionally fetch full history for versioning/changelog
-        sh 'git fetch --prune --unshallow || true'
-      }
-    }
-
-    stage('Prepare / Tooling') {
-      steps {
-        sh '''
-          echo "Node/Java/Go/etc setup goes here if you use tool installers"
-          java -version || true
-          node -v || true
-          go version || true
-        '''
-      }
-    }
-
-    stage('Static Analysis & Tests (parallel)') {
-      parallel {
-        stage('Lint') {
-          when { expression { !params.SKIP_TESTS } }
-          steps {
-            sh '''
-              echo "Run linters here (eslint, golangci-lint, flake8, etc.)"
-              # npm ci && npm run lint
-            '''
-          }
-        }
-        stage('Unit Tests') {
-          when { expression { !params.SKIP_TESTS } }
-          steps {
-            sh '''
-              echo "Run unit tests"
-              # npm test -- --json --outputFile=reports/jest.json
-              # mvn -B -DskipITs test
-            '''
-          }
-          post {
-            always {
-              junit allowEmptyResults: true, testResults: '**/surefire-reports/*.xml, **/junit*.xml'
-              archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
-            }
-          }
-        }
-        stage('SAST') {
-          when {
-            allOf {
-              expression { !params.SKIP_SAST }
-              not { changeRequest() } // optionally skip on PRs
-            }
-          }
-          steps {
-            sh '''
-              echo "Run SAST here (placeholder). Examples:"
-              echo "- Semgrep: semgrep ci --json > reports/semgrep.json || true"
-              echo "- SonarQube: mvn sonar:sonar (with Sonar env)"
-              echo "- Bandit/Trivy FS/etc."
-            '''
-          }
-          post {
-            always {
-              // Publish reports or convert to SARIF for Unify ingestion
-              archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
-            }
-          }
-        }
+        sh 'git rev-parse --abbrev-ref HEAD || true'
       }
     }
 
     stage('Build') {
-      steps {
-        script {
-          if (params.BUILD_KIND == 'container') {
-            sh """
-              echo "Building container image ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG}"
-              docker build -t ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG} .
-            """
-          } else {
-            sh '''
-              echo "Building non-container binary/package"
-              # mvn -B -DskipTests package
-              # or: gradle build; or: go build ./...
-              mkdir -p dist
-              echo "hello" > dist/app-binary
-            '''
+      agent { label 'default' }
+      stages {
+
+        stage('Setup') {
+          steps {
+            script {
+              env.IMAGE_TAG = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
+              echo "IMAGE_TAG=${env.IMAGE_TAG}"
+            }
+            sh 'mkdir -p reports dist || true'
+            writeFile file: 'reports/build-info.txt', text: "build.timestamp=${new Date().time / 1000 as long}\n"
           }
         }
-      }
-    }
 
-    stage('Sign & Package') {
-      steps {
-        script {
-          if (params.BUILD_KIND == 'container') {
-            sh '''
-              echo "Sign image (placeholder). Example with cosign:"
-              # cosign sign --key env://COSIGN_KEY ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG} || true
-            '''
-          } else {
-            sh '''
-              echo "Sign binary (placeholder). Example:"
-              # gpg --batch --yes --detach-sign --armor -u "$SIGNING_KEY_ID" dist/app-binary || true
-            '''
-            archiveArtifacts artifacts: 'dist/**', fingerprint: true
+        stage('Compile / Package') {
+          steps {
+            script {
+              if (params.BUILD_KIND == 'container') {
+                // Container build placeholder - create dist placeholder so archives don't fail
+                sh '''
+                  echo "Simulating docker build (placeholder)."
+                  mkdir -p dist
+                  echo "container image placeholder" > dist/.container-placeholder
+                '''
+                writeFile file: 'reports/artifact.txt', text: "container:${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG}\n"
+              } else {
+                sh '''
+                  echo "Building non-container artifact (placeholder)."
+                  mkdir -p dist
+                  echo "hello world" > dist/${APP_NAME}-${IMAGE_TAG}.bin
+                  echo "Built mock binary" > dist/README.txt
+                '''
+                writeFile file: 'reports/artifact.txt', text: "artifact: dist/${APP_NAME}-${IMAGE_TAG}.bin\n"
+              }
+            }
+          }
+          post {
+            always {
+              // archive dist if present; allowEmptyArchive: true avoids hard failure on older Jenkins but we're ensuring dist exists
+              archiveArtifacts allowEmptyArchive: true, artifacts: 'dist/**'
+            }
           }
         }
-      }
-    }
 
-    stage('Push Artifact/Image') {
-      when { not { changeRequest() } } // typically skip for PRs
-      steps {
-        script {
-          if (params.BUILD_KIND == 'container') {
-            sh """
-              echo "Login & push image"
-              echo "${ARTIFACTORY_CREDS_PSW}" | docker login ${DOCKER_REGISTRY} -u "${ARTIFACTORY_CREDS_USR}" --password-stdin
-              docker push ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG}
-            """
-          } else {
-            sh '''
-              echo "Upload binary to artifact repo (placeholder). Examples:"
-              echo "- curl to Artifactory/Nexus/S3 with credentials"
-            '''
+        stage('Parallel Checks') {
+          parallel {
+            stage('Mock Unit Tests') {
+              when { expression { !params.SKIP_TESTS } }
+              steps {
+                script {
+                  // write junit xml using writeFile to avoid heredoc whitespace problems
+                  writeFile file: 'reports/junit.xml', text: '''<?xml version="1.0" encoding="UTF-8"?>
+<testsuite tests="1" failures="0" errors="0" time="0.01">
+  <testcase classname="com.example.MockTest" name="mockPass" time="0.01"/>
+</testsuite>
+'''
+                }
+              }
+              post {
+                always {
+                  junit allowEmptyResults: true, testResults: 'reports/junit.xml'
+                  archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/junit.xml'
+                }
+              }
+            } // Mock Unit Tests
+
+            stage('Lint / Static Checks') {
+              steps {
+                sh 'mkdir -p reports; echo "Mock linter output" > reports/lint.txt'
+                archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/lint.txt'
+              }
+            } // Lint
+
+            stage('SAST (produce SARIF)') {
+              when { expression { !params.SKIP_SAST } }
+              steps {
+                script {
+                  writeFile file: 'reports/sarif.json', text: '''{
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": { "driver": { "name": "mock-sast", "informationUri": "https://example.com/mock-sast" } },
+      "results": []
+    }
+  ]
+}
+'''
+                }
+              }
+              post {
+                always {
+                  archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/sarif.json'
+                }
+              }
+            } // SAST
+          } // parallel
+        } // Parallel Checks
+
+        stage('Sign & Package') {
+          steps {
+            script {
+              if (params.BUILD_KIND == 'container') {
+                // mock sign info
+                writeFile file: 'reports/signature.txt', text: "signature:mock-signature\n"
+                writeFile file: 'reports/artifact.txt', text: "container:${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG}\n"
+              } else {
+                writeFile file: 'reports/signature.txt', text: "signature:mock-signature\n"
+                writeFile file: 'reports/artifact.txt', text: "artifact: dist/${APP_NAME}-${IMAGE_TAG}.bin\n"
+              }
+            }
+            archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
+            fingerprint 'reports/**'
           }
-        }
-      }
-    }
+        } // Sign & Package
 
-    stage('DAST (main only)') {
+        stage('Push Artifact (non-PR)') {
+          when { not { changeRequest() } }
+          steps {
+            script {
+              if (params.BUILD_KIND == 'container') {
+                // ensure we create upload info even for container case
+                writeFile file: 'reports/upload.info', text: "Pushed container (mock): ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG}\n"
+                sh 'echo "Pushing container to registry (mock). Replace with docker login/push."'
+              } else {
+                withCredentials([usernamePassword(credentialsId: env.ARTIFACTORY_CREDENTIALS_ID, usernameVariable: 'ART_USER', passwordVariable: 'ART_PSW')]) {
+                  writeFile file: 'reports/upload.info', text: "Uploaded dist/${APP_NAME}-${IMAGE_TAG}.bin (mock) by ${ART_USER}\n"
+                  sh 'echo "Uploading artifact to repo (mock)."'
+                }
+              }
+            }
+          }
+          post {
+            always {
+              archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/upload.info'
+            }
+          }
+        } // Push Artifact
+
+        stage('Publish Build Metadata') {
+          steps {
+            script {
+              writeFile file: 'reports/sbom.json', text: '{ "sbom": "mock", "components": [] }'
+              writeFile file: 'reports/build-metadata.json', text: "{ \"image\": \"${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG}\" }\n"
+            }
+            archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
+          }
+        } // Publish Build Metadata
+
+      } // nested Build stages
+    } // Build
+
+    stage('Dev') {
+      agent { label 'default' }
       when {
         allOf {
-          branch 'main'
-          expression { params.RUN_DAST == 'true' && !params.SKIP_DAST }
+          anyOf {
+            branch pattern: "feature/.*", comparator: "REGEXP"
+            not { branch 'main' }
+          }
         }
       }
       steps {
-        sh '''
-          echo "Run DAST here against a test endpoint (placeholder)"
-          # zap-baseline.py -t https://test-env.example.com -J reports/zap.json || true
-        '''
+        echo 'Dev Stage: simulate deploy to dev environment.'
+        sh 'mkdir -p reports; echo "dev-deploy:ok" > reports/dev-deploy.txt'
+        archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/dev-deploy.txt'
       }
-      post {
-        always {
-          archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
+    }
+
+    stage('Test') {
+      agent { label 'default' }
+      steps {
+        echo 'Test Stage: run integration tests and optional DAST'
+        script {
+          if (env.BRANCH_NAME == 'main' && !params.SKIP_DAST) {
+            writeFile file: 'reports/dast.json', text: '{ "dast": "mock-result" }'
+            sh 'echo "Running DAST (mock) against test env - replace with ZAP / Arachni etc."'
+            archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/dast.json'
+          } else {
+            echo "Skipping DAST (branch != main or SKIP_DAST)"
+          }
         }
       }
     }
 
-    stage('Publish Build Metadata (for Unify)') {
-      steps {
-        sh '''
-          echo "Emit SARIF / JUnit / SBOM / signature metadata for Unify ingestion"
-          # Example SBOM:
-          # syft packages dir:. -o cyclonedx-json > reports/sbom.json || true
-        '''
-        archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
-      }
-    }
-
-    // Release stages are typically orchestrated by Unify (Ed.2+).
-    // If you still want a Jenkins deploy for lower envs, add it here guarded by branch.
-    stage('Deploy to Dev (optional)') {
-      when { branch pattern: "feature/.*", comparator: "REGEXP" }
-      steps {
-        sh '''
-          echo "Example: helm upgrade --install ${APP_NAME} charts/${APP_NAME} --namespace dev --set image.tag='${IMAGE_TAG}'"
-        '''
-      }
-    }
-
-    stage('Gate for Promotion (main only)') {
+    stage('Prod') {
+      agent any
       when { branch 'main' }
       steps {
-        input message: "Promote ${APP_NAME}:${IMAGE_TAG} to Next Environment?", ok: 'Approve'
+        script {
+          timeout(time: 30, unit: 'MINUTES') {
+            input message: "Approve promotion of ${APP_NAME}:${IMAGE_TAG} to PROD?", ok: 'Approve', submitter: 'approver1,approver2'
+          }
+          echo 'Prod Stage: deploy approved artifact to Prod (mock)'
+          sh 'mkdir -p reports; echo "prod-deploy:ok" > reports/prod-deploy.txt'
+          archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/prod-deploy.txt'
+        }
       }
     }
+
   } // stages
 
   post {
-    success {
-      echo "Build ${env.BUILD_TAG} succeeded for ${env.BRANCH_NAME}"
-    }
-    failure {
-      echo "Build failed — see stage logs and archived reports."
-    }
+    success { echo "Pipeline succeeded on branch ${env.BRANCH_NAME}" }
+    failure { echo "Pipeline failed on branch ${env.BRANCH_NAME}" }
     always {
-      cleanWs deleteDirs: true, notFailBuild: true
+      // deleteDir() is safer / available in your Jenkins instance
+      script { deleteDir() }
     }
   }
 }
