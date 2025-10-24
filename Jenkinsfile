@@ -1,11 +1,12 @@
-// Jenkinsfile — fixes: deleteDir() instead of cleanWs(), guarded credentials usage.
-// Keeps your original stages/flow.
+// Jenkinsfile (Declarative) — Multibranch-ready
+// Works with PRs, feature branches, tags, and main. Includes gated release steps on main.
+// Safe defaults + clear extension points for CBCI: scanners, artifact signing, uploads, etc.
 
 pipeline {
   agent any
-
   options {
-    // timestamps()/ansiColor removed to avoid plugin/option errors
+    timestamps()
+    ansiColor('xterm')
     durabilityHint('MAX_SURVIVABILITY')
     buildDiscarder(logRotator(numToKeepStr: '30'))
     skipDefaultCheckout(true)
@@ -14,11 +15,14 @@ pipeline {
 
   environment {
     APP_NAME        = 'sample-app'
+    // Change registry/org to yours if building containers
     DOCKER_REGISTRY = 'registry.example.com'
     DOCKER_ORG      = 'verizon-demo'
-    IMAGE_TAG       = "${env.BRANCH_NAME ?: 'unknown'}-${env.BUILD_NUMBER}"
-    // NOTE: removed credentials(...) from environment to avoid immediate failures
-    // Use withCredentials(...) in the stages below (guarded by try/catch)
+    IMAGE_TAG       = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
+    // If you sign artifacts/images, wire your credentials/keys here
+    SIGNING_KEY_ID  = credentials('codesign-key-id')       // optional
+    ARTIFACTORY_CREDS = credentials('artifact-repo-creds') // optional
+    // Useful flags
     RUN_DAST        = "${env.BRANCH_NAME == 'main' ? 'true' : 'false'}"
   }
 
@@ -29,10 +33,16 @@ pipeline {
     choice(name: 'BUILD_KIND', choices: ['container', 'binary'], description: 'Build container image or non-container binary/package')
   }
 
+  triggers {
+    // Webhook-based triggers come from Multibranch automatically; a cron is optional
+    // pollSCM('H/5 * * * *')
+  }
+
   stages {
     stage('Checkout') {
       steps {
         checkout scm
+        // optionally fetch full history for versioning/changelog
         sh 'git fetch --prune --unshallow || true'
       }
     }
@@ -55,51 +65,50 @@ pipeline {
           steps {
             sh '''
               echo "Run linters here (eslint, golangci-lint, flake8, etc.)"
+              # npm ci && npm run lint
             '''
           }
         }
-
         stage('Unit Tests') {
           when { expression { !params.SKIP_TESTS } }
           steps {
             sh '''
-              mkdir -p reports/junit
-              # Example JUnit files (replace with real test runner output)
-              cat > reports/junit/TEST-add.xml <<'XML'
-              <?xml version="1.0" encoding="UTF-8"?>
-              <testsuite tests="1" failures="0" name="add-suite">
-                <testcase classname="sample.calculator" name="test_add" time="0.01">
-                  <system-out>input=(3,4); expected=7; actual=7</system-out>
-                </testcase>
-              </testsuite>
-              XML
+              echo "Run unit tests"
+              # npm test -- --json --outputFile=reports/jest.json
+              # mvn -B -DskipITs test
             '''
           }
           post {
             always {
-              junit allowEmptyResults: true, testResults: 'reports/junit/*.xml'
+              junit allowEmptyResults: true, testResults: '**/surefire-reports/*.xml, **/junit*.xml'
               archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
             }
           }
         }
-
         stage('SAST') {
           when {
             allOf {
               expression { !params.SKIP_SAST }
-              not { changeRequest() }
+              not { changeRequest() } // optionally skip on PRs
             }
           }
           steps {
             sh '''
-              mkdir -p reports/sarif
-              echo '{ "version":"2.1.0", "runs":[ { "tool": { "driver": { "name":"mock-sast" } }, "results": [] } ] }' > reports/sarif/result.sarif
+              echo "Run SAST here (placeholder). Examples:"
+              echo "- Semgrep: semgrep ci --json > reports/semgrep.json || true"
+              echo "- SonarQube: mvn sonar:sonar (with Sonar env)"
+              echo "- Bandit/Trivy FS/etc."
             '''
           }
-          post { always { archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**' } }
+          post {
+            always {
+              // Publish reports or convert to SARIF for Unify ingestion
+              archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
+            }
+          }
         }
       }
-    } // parallel
+    }
 
     stage('Build') {
       steps {
@@ -112,6 +121,8 @@ pipeline {
           } else {
             sh '''
               echo "Building non-container binary/package"
+              # mvn -B -DskipTests package
+              # or: gradle build; or: go build ./...
               mkdir -p dist
               echo "hello" > dist/app-binary
             '''
@@ -123,28 +134,16 @@ pipeline {
     stage('Sign & Package') {
       steps {
         script {
-          // Try to use codesign credential only if present; fail-safe if missing.
-          try {
-            withCredentials([string(credentialsId: 'codesign-key-id', variable: 'CODESIGN_KEY')]) {
-              if (params.BUILD_KIND == 'container') {
-                sh '''
-                  echo "Sign image (placeholder) using CODESIGN_KEY"
-                  # cosign sign --key env://CODESIGN_KEY ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG} || true
-                '''
-              } else {
-                sh '''
-                  mkdir -p dist/signature
-                  echo "signed-binary:${IMAGE_TAG}" > dist/signature/${APP_NAME}.sig
-                  # gpg --batch --yes --detach-sign --armor -u "$CODESIGN_KEY" dist/app-binary || true
-                '''
-                archiveArtifacts artifacts: 'dist/**', fingerprint: true
-              }
-            }
-          } catch (err) {
-            // Credentials not found or signing failed; continue but warn
-            echo "Signing skipped or failed (codesign-key-id missing or error): ${err}"
-            // Create a placeholder signature so downstream can continue
-            sh 'mkdir -p dist/signature && echo "unsigned:${IMAGE_TAG}" > dist/signature/${APP_NAME}.sig || true'
+          if (params.BUILD_KIND == 'container') {
+            sh '''
+              echo "Sign image (placeholder). Example with cosign:"
+              # cosign sign --key env://COSIGN_KEY ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG} || true
+            '''
+          } else {
+            sh '''
+              echo "Sign binary (placeholder). Example:"
+              # gpg --batch --yes --detach-sign --armor -u "$SIGNING_KEY_ID" dist/app-binary || true
+            '''
             archiveArtifacts artifacts: 'dist/**', fingerprint: true
           }
         }
@@ -152,27 +151,20 @@ pipeline {
     }
 
     stage('Push Artifact/Image') {
-      when { not { changeRequest() } }
+      when { not { changeRequest() } } // typically skip for PRs
       steps {
         script {
-          try {
-            // Try to find artifact-repo-creds (username/password). If missing, withCredentials will throw and we catch it.
-            withCredentials([usernamePassword(credentialsId: 'artifact-repo-creds', usernameVariable: 'ART_USER', passwordVariable: 'ART_PSW')]) {
-              if (params.BUILD_KIND == 'container') {
-                sh """
-                  echo "Logging in (mock) and pushing image..."
-                  echo "$ART_PSW" | docker login ${DOCKER_REGISTRY} -u "$ART_USER" --password-stdin || true
-                  # docker push ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG} || true
-                """
-              } else {
-                sh '''
-                  echo "Upload binary to artifact repo (mock). Use $ART_USER and $ART_PSW"
-                  # curl -u "$ART_USER:$ART_PSW" -T dist/${APP_NAME} https://myrepo/repo/...
-                '''
-              }
-            }
-          } catch (err) {
-            echo "artifact-repo-creds not available or push failed; skipping push. Error: ${err}"
+          if (params.BUILD_KIND == 'container') {
+            sh """
+              echo "Login & push image"
+              echo "${ARTIFACTORY_CREDS_PSW}" | docker login ${DOCKER_REGISTRY} -u "${ARTIFACTORY_CREDS_USR}" --password-stdin
+              docker push ${DOCKER_REGISTRY}/${DOCKER_ORG}/${APP_NAME}:${IMAGE_TAG}
+            """
+          } else {
+            sh '''
+              echo "Upload binary to artifact repo (placeholder). Examples:"
+              echo "- curl to Artifactory/Nexus/S3 with credentials"
+            '''
           }
         }
       }
@@ -191,20 +183,26 @@ pipeline {
           # zap-baseline.py -t https://test-env.example.com -J reports/zap.json || true
         '''
       }
-      post { always { archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**' } }
+      post {
+        always {
+          archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
+        }
+      }
     }
 
     stage('Publish Build Metadata (for Unify)') {
       steps {
         sh '''
           echo "Emit SARIF / JUnit / SBOM / signature metadata for Unify ingestion"
-          mkdir -p reports/metadata
-          echo "{ \\"artifact\\": \\"${APP_NAME}\\", \\"tag\\": \\"${IMAGE_TAG}\\" }" > reports/metadata/build.json
+          # Example SBOM:
+          # syft packages dir:. -o cyclonedx-json > reports/sbom.json || true
         '''
         archiveArtifacts allowEmptyArchive: true, artifacts: 'reports/**'
       }
     }
 
+    // Release stages are typically orchestrated by Unify (Ed.2+).
+    // If you still want a Jenkins deploy for lower envs, add it here guarded by branch.
     stage('Deploy to Dev (optional)') {
       when { branch pattern: "feature/.*", comparator: "REGEXP" }
       steps {
@@ -230,15 +228,7 @@ pipeline {
       echo "Build failed — see stage logs and archived reports."
     }
     always {
-      script {
-        echo "Cleaning workspace using deleteDir()"
-        try {
-          // deleteDir is built-in and available; safer than cleanWs() here
-          deleteDir()
-        } catch (err) {
-          echo "deleteDir() failed: ${err}. If workspace plugin needed, consider installing Workspace Cleanup plugin."
-        }
-      }
+      cleanWs deleteDirs: true, notFailBuild: true
     }
   }
 }
