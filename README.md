@@ -2,6 +2,7 @@
 - sn: My First Commit
 - sn: My Second Commit
 - sn: My Third Commit
+- sn: Verizon Demo
 
 # ###########################################################
 # PLEASE NOTE:  DOW Demo YAML File located in Root Directory
